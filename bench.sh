@@ -1,149 +1,193 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称：威软科技 VPS 性能极速测试脚本 (WeiRuan Bench)
-# 开发者：威软科技 (WeiRuan Technology)
-# 版本：v1.0.0
+# HyperBench - VPS Performance Benchmark Script
+# Version: 1.2.0
+# Author: HyperBench Team (Designed for You)
 # =========================================================
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-SKYBLUE='\033[1;36m'
+SKYBLUE='\033[0;36m'
+PLAIN='\033[0m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
 
-# --- 辅助函数：绘制分割线 ---
-draw_line() {
-    printf "${CYAN}============================================================${NC}\n"
+# --- 清屏并打印 Banner ---
+clear
+echo -e "${SKYBLUE}==========================================================${PLAIN}"
+echo -e "${BOLD}🚀  HyperBench (极速探针) v1.2.0${PLAIN}"
+echo -e "${SKYBLUE}==========================================================${PLAIN}"
+echo -e "正在初始化测试环境，请稍候..."
+echo ""
+
+# --- 检查并安装基础依赖 ---
+check_dependencies() {
+    if [ -f /etc/redhat-release ]; then
+        CMD="yum"
+    elif [ -f /etc/debian_version ]; then
+        CMD="apt-get"
+    else
+        CMD="apt-get" # Fallback
+    fi
+
+    # 检查 curl
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${YELLOW}正在安装 curl...${PLAIN}"
+        $CMD update -y >/dev/null 2>&1
+        $CMD install curl -y >/dev/null 2>&1
+    fi
+
+    # 检查 wget
+    if ! command -v wget >/dev/null 2>&1; then
+        echo -e "${YELLOW}正在安装 wget...${PLAIN}"
+        $CMD install wget -y >/dev/null 2>&1
+    fi
+    
+    # 检查 python3 (用于 speedtest)
+    if ! command -v python3 >/dev/null 2>&1; then
+         echo -e "${YELLOW}正在安装 python3...${PLAIN}"
+         $CMD install python3 -y >/dev/null 2>&1
+    fi
 }
 
-# --- 辅助函数：Logo 展示 ---
-show_logo() {
-    clear
-    echo -e "${SKYBLUE}"
-    echo "  __          __   _ _____                       "
-    echo "  \ \        / /  (_)  __ \                      "
-    echo "   \ \  /\  / /___ _| |__) |_   _  __ _ _ __     "
-    echo "    \ \/  \/ / _ \ |  _  /| | | |/ _\` | '_ \    "
-    echo "     \  /\  /  __/ | | \ \| |_| | (_| | | | |   "
-    echo "      \/  \/ \___|_|_|  \_\\__,_|\__,_|_| |_|   "
-    echo "                                                 "
-    echo "          WeiRuan Technology - 威 软 科 技        "
-    echo -e "${NC}"
-    echo -e "${PURPLE}      >>> 正在初始化威软云端监测系统... <<< ${NC}"
-    echo ""
-    sleep 1
-}
+check_dependencies
 
 # --- 1. 获取系统信息 ---
 get_system_info() {
-    draw_line
-    echo -e "${YELLOW} [ 系统基础信息 ] ${NC}"
+    echo -e "${BOLD}💻 系统信息预览 (System Info)${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
     
-    # 操作系统
-    if [ -f /etc/os-release ]; then
-        OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release)
-    else
-        OS_NAME=$(uname -s)
-    fi
+    # CPU 型号
+    cpu_model=$(grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2 | sed 's/^[ \t]*//')
+    if [ -z "$cpu_model" ]; then cpu_model=$(lscpu | grep 'Model name' | cut -d: -f2 | sed 's/^[ \t]*//'); fi
     
-    # 内核版本
-    KERNEL=$(uname -r)
+    # 核心数
+    cores=$(grep 'processor' /proc/cpuinfo | sort -u | wc -l)
     
-    # CPU 信息
-    CPU_MODEL=$(awk -F':' '/^model name/ {print $2}' /proc/cpuinfo | uniq | sed 's/^[ \t]*//')
-    CPU_CORES=$(grep -c ^processor /proc/cpuinfo)
+    # 架构
+    arch=$(uname -m)
     
-    # 运行时间
-    UPTIME=$(uptime -p | sed 's/up //')
+    # 虚拟化
+    virt=$(systemd-detect-virt 2>/dev/null || echo "Unknown")
     
-    echo -e " 操作系统 : ${GREEN}$OS_NAME${NC}"
-    echo -e " 内核版本 : ${GREEN}$KERNEL${NC}"
-    echo -e " CPU 型号 : ${GREEN}$CPU_MODEL${NC}"
-    echo -e " CPU 核心 : ${GREEN}$CPU_CORES Cores${NC}"
-    echo -e " 运行时间 : ${GREEN}$UPTIME${NC}"
-}
-
-# --- 2. 内存与磁盘测试 ---
-get_resource_usage() {
-    draw_line
-    echo -e "${YELLOW} [ 资源与 I/O 测试 ] ${NC}"
-
     # 内存
-    MEM_TOTAL=$(free -m | awk '/Mem:/ { print $2 }')
-    MEM_USED=$(free -m | awk '/Mem:/ { print $3 }')
-    MEM_FREE=$(free -m | awk '/Mem:/ { print $4 }')
+    ram_total=$(free -m | grep Mem | awk '{print $2}')
+    ram_used=$(free -m | grep Mem | awk '{print $3}')
+    swap_total=$(free -m | grep Swap | awk '{print $2}')
     
-    # 简单的进度条逻辑
-    PERCENT=$((MEM_USED * 100 / MEM_TOTAL))
-    BAR_LENGTH=20
-    FILLED=$((PERCENT * BAR_LENGTH / 100))
-    UNFILLED=$((BAR_LENGTH - FILLED))
-    BAR=$(printf "%0.s#" $(seq 1 $FILLED))
-    SPACE=$(printf "%0.s-" $(seq 1 $UNFILLED))
+    # 硬盘
+    disk_total=$(df -h / | awk 'NR==2 {print $2}')
+    disk_used=$(df -h / | awk 'NR==2 {print $3}')
+    
+    # 在线时间
+    uptime_info=$(uptime -p | sed 's/up //')
+    
+    # TCP 拥塞控制
+    tcp_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    
+    echo -e " 核心架构 : ${SKYBLUE}$arch ($virt)${PLAIN}"
+    echo -e " CPU 型号 : ${SKYBLUE}$cpu_model${PLAIN}"
+    echo -e " CPU 核心 : ${SKYBLUE}$cores Cores${PLAIN}"
+    echo -e " 内存容量 : ${SKYBLUE}${ram_used}MB / ${ram_total}MB${PLAIN} (Swap: ${swap_total}MB)"
+    echo -e " 硬盘空间 : ${SKYBLUE}${disk_used} / ${disk_total}${PLAIN}"
+    echo -e " TCP 算法 : ${SKYBLUE}${tcp_cc}${PLAIN}"
+    echo -e " 在线时间 : ${SKYBLUE}${uptime_info}${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+}
 
-    echo -e " 内存大小 : ${BOLD}${MEM_TOTAL} MB${NC}"
-    echo -e " 内存占用 : [${BLUE}${BAR}${NC}${SPACE}] ${PERCENT}% (已用 ${MEM_USED} MB)"
-
-    # 磁盘 I/O (DD 测试)
-    echo -e " 正在测试磁盘 I/O 性能 (请稍候)..."
-    DISK_SPEED=$(dd if=/dev/zero of=test_$$ bs=64k count=16k conv=fdatasync 2>&1 | awk -F, '{io=$NF} END { print io}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+# --- 2. 磁盘 I/O 测试 (使用 dd 快速模拟) ---
+test_disk_io() {
+    echo -e "${BOLD}💾 硬盘 I/O 性能测试 (Disk I/O - Quick)${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+    echo -e "正在测试写入速度 (1GB file)..."
+    
+    # 运行 dd 测试
+    io_test=$(dd if=/dev/zero of=test_$$ bs=64k count=16k conv=fdatasync 2>&1 | awk -F, '{io=$NF} END { print io}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+    
+    # 清理临时文件
     rm -f test_$$
-    echo -e " I/O 速度 : ${SKYBLUE}$DISK_SPEED${NC}"
+    
+    echo -e " 写入速度 : ${GREEN}${io_test}${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
 }
 
-# --- 3. 网络测速 (使用 Speedtest-cli) ---
-network_test() {
-    draw_line
-    echo -e "${YELLOW} [ 网络连接测速 ] ${NC}"
+# --- 3. 网络测速 (使用 speedtest-cli) ---
+test_network() {
+    echo -e "${BOLD}🌐 全球网络测速 (Speedtest.net)${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+    echo -e "正在安装/运行 Speedtest，请稍候..."
+
+    # 下载官方 CLI 脚本
+    curl -s https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py > speedtest_cli.py
+    chmod +x speedtest_cli.py
+
+    echo -e " 节点名称              | 上传速度 (Upload) | 下载速度 (Download) | 延迟 (Ping)"
+    echo -e " --------------------|------------------|--------------------|-----------"
     
-    # 检查是否安装 python
-    if ! command -v python3 &> /dev/null; then
-        echo -e "${RED}未检测到 Python3，跳过详细测速，仅进行 Ping 测试。${NC}"
-    else
-        echo -e " 正在连接最近的 Speedtest 节点..."
-        # 下载官方 CLI 脚本并运行
-        curl -s -L https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py > speedtest_runner.py
-        chmod +x speedtest_runner.py
+    run_speedtest() {
+        local name=$1
+        # 简单输出处理，实际生产脚本会解析 JSON
+        # 这里为了演示，直接运行最近节点
+        output=$(python3 speedtest_cli.py --simple)
+        ping=$(echo "$output" | grep 'Ping' | awk '{print $2, $3}')
+        dl=$(echo "$output" | grep 'Download' | awk '{print $2, $3}')
+        ul=$(echo "$output" | grep 'Upload' | awk '{print $2, $3}')
         
-        # 捕获输出
-        SPEED_OUTPUT=$(python3 speedtest_runner.py --simple)
-        
-        PING=$(echo "$SPEED_OUTPUT" | grep "Ping" | awk '{print $2, $3}')
-        DOWNLOAD=$(echo "$SPEED_OUTPUT" | grep "Download" | awk '{print $2, $3}')
-        UPLOAD=$(echo "$SPEED_OUTPUT" | grep "Upload" | awk '{print $2, $3}')
-        
-        echo -e " 延迟 (Ping): ${GREEN}$PING${NC}"
-        echo -e " 下载 (Dl)  : ${SKYBLUE}$DOWNLOAD${NC}"
-        echo -e " 上传 (Ul)  : ${PURPLE}$UPLOAD${NC}"
-        
-        rm -f speedtest_runner.py
-    fi
-    
-    # 获取 IP 归属地 (简单版)
-    IPV4=$(curl -s4m 5 ip.sb)
-    if [[ -n "$IPV4" ]]; then
-        echo -e " 公网 IPv4  : ${GREEN}$IPV4${NC}"
-    else
-        echo -e " 公网 IPv4  : ${RED}检测失败${NC}"
-    fi
+        printf " %-20s | %-16s | %-18s | %s\n" "$name" "$ul" "$dl" "$ping"
+    }
+
+    # 默认测速 (自动选择最近节点)
+    run_speedtest "[自动] 最近节点"
+
+    # 清理
+    rm -f speedtest_cli.py
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
 }
 
-# --- 主程序执行 ---
-show_logo
+# --- 4. 流媒体解锁检测 (Curl 简单探测) ---
+check_unlock() {
+    echo -e "${BOLD}🎬 流媒体与 AI 解锁检测 (Unlock Status)${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+    
+    check_url() {
+        local url=$1
+        local name=$2
+        # -o /dev/null 丢弃输出, -s 静默, -w %{http_code} 获取状态码
+        code=$(curl -o /dev/null -s -w "%{http_code}" --max-time 5 "$url")
+        if [[ "$code" == "200" ]] || [[ "$code" == "301" ]] || [[ "$code" == "302" ]]; then
+            echo -e " $name      : ${GREEN}✅ Yes${PLAIN}"
+        elif [[ "$code" == "403" ]]; then
+             # 403 通常意味着 IP 被识别但被拒绝，或者需要登录，视具体服务而定
+             # 对于 ChatGPT，403 通常意味着 Cloudflare 拦截
+            echo -e " $name      : ${RED}❌ No (403 Forbidden)${PLAIN}"
+        else
+            echo -e " $name      : ${RED}❌ No (Error: $code)${PLAIN}"
+        fi
+    }
+
+    # ChatGPT (检测 API 访问)
+    # 注意：准确检测需要更复杂的脚本，这里仅做连通性测试
+    check_url "https://chat.openai.com/cdn-cgi/trace" "ChatGPT (Web)"
+    
+    # YouTube
+    check_url "https://www.youtube.com" "YouTube     "
+    
+    # Netflix (仅做基础连通性检查，不代表能看自制剧)
+    check_url "https://www.netflix.com/title/80018499" "Netflix     "
+
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+}
+
+# --- 主程序执行流 ---
+
 get_system_info
-get_resource_usage
-network_test
+test_disk_io
+test_network
+check_unlock
 
-draw_line
-echo -e "${BOLD} 测试完成！${NC}"
-echo -e " 数据生成时间: $(date '+%Y-%m-%d %H:%M:%S')"
-echo -e " ${CYAN}由 [威软科技] 提供技术支持${NC}"
-echo -e " ${CYAN}官网: www.weiruan-tech-demo.com (示例)${NC}"
-draw_line
 echo ""
+echo -e " 测试完成时间 : $(date '+%Y-%m-%d %H:%M:%S')"
+echo -e " ${BOLD}感谢使用 HyperBench!${PLAIN}"
+echo -e "${SKYBLUE}==========================================================${PLAIN}"
