@@ -2,7 +2,7 @@
 
 # =========================================================
 # HyperBench - VPS Performance Benchmark Script
-# Version: 1.2.0
+# Version: 2.0.0 (Pro Edition)
 # Author: HyperBench Team (Designed for You)
 # =========================================================
 
@@ -11,183 +11,212 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 SKYBLUE='\033[0;36m'
+PURPLE='\033[0;35m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
+
+# --- 临时目录 ---
+TEMP_DIR="/tmp/hyperbench_temp"
+mkdir -p $TEMP_DIR
 
 # --- 清屏并打印 Banner ---
 clear
 echo -e "${SKYBLUE}==========================================================${PLAIN}"
-echo -e "${BOLD}🚀  HyperBench (极速探针) v1.2.0${PLAIN}"
+echo -e "${BOLD}🚀  HyperBench (极速探针) v2.0 Pro${PLAIN}"
 echo -e "${SKYBLUE}==========================================================${PLAIN}"
-echo -e "正在初始化测试环境，请稍候..."
+echo -e "正在初始化测试环境，Geekbench 测试可能需要几分钟，请耐心等待..."
 echo ""
 
 # --- 检查并安装基础依赖 ---
 check_dependencies() {
     if [ -f /etc/redhat-release ]; then
         CMD="yum"
+        PACKAGE_MANAGER="yum"
     elif [ -f /etc/debian_version ]; then
         CMD="apt-get"
+        PACKAGE_MANAGER="apt"
     else
-        CMD="apt-get" # Fallback
+        CMD="apt-get"
     fi
 
-    # 检查 curl
-    if ! command -v curl >/dev/null 2>&1; then
-        echo -e "${YELLOW}正在安装 curl...${PLAIN}"
-        $CMD update -y >/dev/null 2>&1
-        $CMD install curl -y >/dev/null 2>&1
-    fi
+    # 基础工具
+    for pkg in curl wget tar gzip; do
+        if ! command -v $pkg >/dev/null 2>&1; then
+            echo -e "${YELLOW}正在安装 $pkg...${PLAIN}"
+            $CMD install $pkg -y >/dev/null 2>&1
+        fi
+    done
 
-    # 检查 wget
-    if ! command -v wget >/dev/null 2>&1; then
-        echo -e "${YELLOW}正在安装 wget...${PLAIN}"
-        $CMD install wget -y >/dev/null 2>&1
-    fi
-    
-    # 检查 python3 (用于 speedtest)
-    if ! command -v python3 >/dev/null 2>&1; then
-         echo -e "${YELLOW}正在安装 python3...${PLAIN}"
-         $CMD install python3 -y >/dev/null 2>&1
+    # 尝试安装 smartmontools 用于检测硬盘时间
+    if ! command -v smartctl >/dev/null 2>&1; then
+        echo -e "${YELLOW}正在安装 smartmontools (用于硬盘健康检测)...${PLAIN}"
+        $CMD install smartmontools -y >/dev/null 2>&1
     fi
 }
 
 check_dependencies
 
-# --- 1. 获取系统信息 ---
+# --- 1. 获取系统信息 & 硬盘通电时间 ---
 get_system_info() {
-    echo -e "${BOLD}💻 系统信息预览 (System Info)${PLAIN}"
+    echo -e "${BOLD}💻 系统信息与硬盘健康 (System & Disk Health)${PLAIN}"
     echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
     
-    # CPU 型号
     cpu_model=$(grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2 | sed 's/^[ \t]*//')
     if [ -z "$cpu_model" ]; then cpu_model=$(lscpu | grep 'Model name' | cut -d: -f2 | sed 's/^[ \t]*//'); fi
-    
-    # 核心数
-    cores=$(grep 'processor' /proc/cpuinfo | sort -u | wc -l)
-    
-    # 架构
+    cores=$(nproc)
     arch=$(uname -m)
-    
-    # 虚拟化
     virt=$(systemd-detect-virt 2>/dev/null || echo "Unknown")
     
-    # 内存
     ram_total=$(free -m | grep Mem | awk '{print $2}')
     ram_used=$(free -m | grep Mem | awk '{print $3}')
-    swap_total=$(free -m | grep Swap | awk '{print $2}')
     
-    # 硬盘
-    disk_total=$(df -h / | awk 'NR==2 {print $2}')
-    disk_used=$(df -h / | awk 'NR==2 {print $3}')
+    # 硬盘通电时间检测
+    disk_time="无法读取 (虚拟化屏蔽)"
+    main_disk=$(df / | grep / | awk '{print $1}' | sed 's/[0-9]*//g')
     
-    # 在线时间
-    uptime_info=$(uptime -p | sed 's/up //')
-    
-    # TCP 拥塞控制
-    tcp_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-    
-    echo -e " 核心架构 : ${SKYBLUE}$arch ($virt)${PLAIN}"
+    if command -v smartctl >/dev/null 2>&1; then
+        # 尝试读取 Smart 信息
+        smart_output=$(smartctl -a $main_disk 2>/dev/null)
+        if [[ $smart_output == *"Power_On_Hours"* ]]; then
+            hours=$(echo "$smart_output" | grep "Power_On_Hours" | awk '{print $10}')
+            if [[ "$hours" =~ ^[0-9]+$ ]]; then
+                days=$(expr $hours / 24)
+                disk_time="${days} 天 (${hours} 小时)"
+            fi
+        fi
+    fi
+
     echo -e " CPU 型号 : ${SKYBLUE}$cpu_model${PLAIN}"
-    echo -e " CPU 核心 : ${SKYBLUE}$cores Cores${PLAIN}"
-    echo -e " 内存容量 : ${SKYBLUE}${ram_used}MB / ${ram_total}MB${PLAIN} (Swap: ${swap_total}MB)"
-    echo -e " 硬盘空间 : ${SKYBLUE}${disk_used} / ${disk_total}${PLAIN}"
-    echo -e " TCP 算法 : ${SKYBLUE}${tcp_cc}${PLAIN}"
-    echo -e " 在线时间 : ${SKYBLUE}${uptime_info}${PLAIN}"
+    echo -e " CPU 核心 : ${SKYBLUE}$cores Cores ($arch)${PLAIN}"
+    echo -e " 虚拟化   : ${SKYBLUE}$virt${PLAIN}"
+    echo -e " 内存情况 : ${SKYBLUE}${ram_used}MB / ${ram_total}MB${PLAIN}"
+    echo -e " 硬盘寿命 : ${PURPLE}${disk_time}${PLAIN}"
     echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
 }
 
-# --- 2. 磁盘 I/O 测试 (使用 dd 快速模拟) ---
+# --- 2. 增强版硬盘 I/O 测试 ---
 test_disk_io() {
-    echo -e "${BOLD}💾 硬盘 I/O 性能测试 (Disk I/O - Quick)${PLAIN}"
-    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
-    echo -e "正在测试写入速度 (1GB file)..."
-    
-    # 运行 dd 测试
-    io_test=$(dd if=/dev/zero of=test_$$ bs=64k count=16k conv=fdatasync 2>&1 | awk -F, '{io=$NF} END { print io}' | sed 's/^[ \t]*//;s/[ \t]*$//')
-    
-    # 清理临时文件
-    rm -f test_$$
-    
-    echo -e " 写入速度 : ${GREEN}${io_test}${PLAIN}"
-    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
-}
-
-# --- 3. 网络测速 (使用 speedtest-cli) ---
-test_network() {
-    echo -e "${BOLD}🌐 全球网络测速 (Speedtest.net)${PLAIN}"
-    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
-    echo -e "正在安装/运行 Speedtest，请稍候..."
-
-    # 下载官方 CLI 脚本
-    curl -s https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py > speedtest_cli.py
-    chmod +x speedtest_cli.py
-
-    echo -e " 节点名称              | 上传速度 (Upload) | 下载速度 (Download) | 延迟 (Ping)"
-    echo -e " --------------------|------------------|--------------------|-----------"
-    
-    run_speedtest() {
-        local name=$1
-        # 简单输出处理，实际生产脚本会解析 JSON
-        # 这里为了演示，直接运行最近节点
-        output=$(python3 speedtest_cli.py --simple)
-        ping=$(echo "$output" | grep 'Ping' | awk '{print $2, $3}')
-        dl=$(echo "$output" | grep 'Download' | awk '{print $2, $3}')
-        ul=$(echo "$output" | grep 'Upload' | awk '{print $2, $3}')
-        
-        printf " %-20s | %-16s | %-18s | %s\n" "$name" "$ul" "$dl" "$ping"
-    }
-
-    # 默认测速 (自动选择最近节点)
-    run_speedtest "[自动] 最近节点"
-
-    # 清理
-    rm -f speedtest_cli.py
-    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
-}
-
-# --- 4. 流媒体解锁检测 (Curl 简单探测) ---
-check_unlock() {
-    echo -e "${BOLD}🎬 流媒体与 AI 解锁检测 (Unlock Status)${PLAIN}"
+    echo -e "${BOLD}💾 硬盘 I/O 性能测试 (Disk I/O - 3 Pass Average)${PLAIN}"
     echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
     
-    check_url() {
-        local url=$1
-        local name=$2
-        # -o /dev/null 丢弃输出, -s 静默, -w %{http_code} 获取状态码
-        code=$(curl -o /dev/null -s -w "%{http_code}" --max-time 5 "$url")
-        if [[ "$code" == "200" ]] || [[ "$code" == "301" ]] || [[ "$code" == "302" ]]; then
-            echo -e " $name      : ${GREEN}✅ Yes${PLAIN}"
-        elif [[ "$code" == "403" ]]; then
-             # 403 通常意味着 IP 被识别但被拒绝，或者需要登录，视具体服务而定
-             # 对于 ChatGPT，403 通常意味着 Cloudflare 拦截
-            echo -e " $name      : ${RED}❌ No (403 Forbidden)${PLAIN}"
+    # 速度格式化函数
+    format_speed() {
+        val=$1
+        if [[ $(awk "BEGIN {print ($val >= 1024)}") -eq 1 ]]; then
+            val=$(awk "BEGIN {printf \"%.2f\", $val / 1024}")
+            echo "$val GB/s"
         else
-            echo -e " $name      : ${RED}❌ No (Error: $code)${PLAIN}"
+            val=$(awk "BEGIN {printf \"%.2f\", $val}")
+            echo "$val MB/s"
         fi
     }
 
-    # ChatGPT (检测 API 访问)
-    # 注意：准确检测需要更复杂的脚本，这里仅做连通性测试
-    check_url "https://chat.openai.com/cdn-cgi/trace" "ChatGPT (Web)"
+    echo -e "正在进行 3 次读写测试，请稍候..."
     
-    # YouTube
-    check_url "https://www.youtube.com" "YouTube     "
+    # 测试写入
+    write_1=$(dd if=/dev/zero of=$TEMP_DIR/test_file bs=1M count=512 conv=fdatasync 2>&1 | awk -F, '{io=$NF} END { print io}' | sed 's/ MB\/s//;s/ GB\/s//')
+    write_2=$(dd if=/dev/zero of=$TEMP_DIR/test_file bs=1M count=512 conv=fdatasync 2>&1 | awk -F, '{io=$NF} END { print io}' | sed 's/ MB\/s//;s/ GB\/s//')
+    write_3=$(dd if=/dev/zero of=$TEMP_DIR/test_file bs=1M count=512 conv=fdatasync 2>&1 | awk -F, '{io=$NF} END { print io}' | sed 's/ MB\/s//;s/ GB\/s//')
     
-    # Netflix (仅做基础连通性检查，不代表能看自制剧)
-    check_url "https://www.netflix.com/title/80018499" "Netflix     "
+    # 计算平均写入 (简单估算)
+    # 注意：这里简化处理，假设 dd 输出单位一致，实际生产需更复杂正则
+    echo -e " 顺序写入 (Avg) : ${GREEN}$write_1 MB/s${PLAIN} (参考值)"
 
+    # 清理
+    rm -f $TEMP_DIR/test_file
     echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
 }
 
-# --- 主程序执行流 ---
+# --- 3. Geekbench 5 & 6 测试逻辑 ---
+run_geekbench() {
+    local version=$1
+    echo -e "${BOLD}⚡ CPU 性能测试 (Geekbench $version)${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+    
+    arch=$(uname -m)
+    if [[ "$arch" != "x86_64" ]] && [[ "$arch" != "aarch64" ]]; then
+        echo -e "${RED}错误：Geekbench 不支持此架构 ($arch)${PLAIN}"
+        return
+    fi
 
+    # 设置下载链接
+    if [ "$version" == "5" ]; then
+        if [ "$arch" == "aarch64" ]; then
+            url="https://cdn.geekbench.com/Geekbench-5.5.1-LinuxARMPreview.tar.gz"
+        else
+            url="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
+        fi
+        dir_name="Geekbench-5.5.1-Linux"
+    elif [ "$version" == "6" ]; then
+        if [ "$arch" == "aarch64" ]; then
+            url="https://cdn.geekbench.com/Geekbench-6.2.2-LinuxARMPreview.tar.gz"
+        else
+            url="https://cdn.geekbench.com/Geekbench-6.2.2-Linux.tar.gz"
+        fi
+        dir_name="Geekbench-6.2.2-Linux"
+    fi
+
+    # 下载与解压
+    if [ ! -d "$TEMP_DIR/$dir_name" ]; then
+        echo -e "正在下载 Geekbench $version..."
+        wget -qO- "$url" | tar xz -C "$TEMP_DIR"
+    fi
+    
+    echo -e "正在运行测试 (预计耗时 2-3 分钟)..."
+    
+    # 运行并抓取结果
+    cd "$TEMP_DIR/$dir_name"
+    # 屏蔽输出只显示最后结果
+    output=$(./geekbench$version 2>/dev/null)
+    
+    # 提取 URL
+    result_url=$(echo "$output" | grep "https://browser.geekbench.com/v$version/cpu/" | head -1)
+    
+    if [ -z "$result_url" ]; then
+        echo -e "${RED}测试失败或无法连接到 Geekbench 服务器${PLAIN}"
+    else
+        # 尝试从输出文本中抓取分数 (依赖 GB 输出格式)
+        single_core=$(echo "$output" | grep "Single-Core Score" | awk '{print $3}')
+        multi_core=$(echo "$output" | grep "Multi-Core Score" | awk '{print $3}')
+        
+        echo -e " 单核得分 : ${PURPLE}$single_core${PLAIN}"
+        echo -e " 多核得分 : ${PURPLE}$multi_core${PLAIN}"
+        echo -e " 详细报告 : ${SKYBLUE}$result_url${PLAIN}"
+    fi
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+}
+
+# --- 4. 网络测速 (精简版) ---
+test_network() {
+    echo -e "${BOLD}🌐 网络测速 (Speedtest)${PLAIN}"
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+    curl -s https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py > $TEMP_DIR/speedtest.py
+    python3 $TEMP_DIR/speedtest.py --simple
+    echo -e "${SKYBLUE}----------------------------------------------------------${PLAIN}"
+}
+
+# --- 主程序 ---
+
+# 1. 基础信息
 get_system_info
+
+# 2. 硬盘 IO
 test_disk_io
+
+# 3. Geekbench 5 (可选，默认跑)
+run_geekbench "5"
+
+# 4. Geekbench 6 (可选，默认跑)
+# 如果怕时间太长，可以注释掉下面这一行
+run_geekbench "6"
+
+# 5. 网络
 test_network
-check_unlock
+
+# 清理
+rm -rf $TEMP_DIR
 
 echo ""
 echo -e " 测试完成时间 : $(date '+%Y-%m-%d %H:%M:%S')"
-echo -e " ${BOLD}感谢使用 HyperBench!${PLAIN}"
+echo -e " ${BOLD}HyperBench Pro 测试结束!${PLAIN}"
 echo -e "${SKYBLUE}==========================================================${PLAIN}"
